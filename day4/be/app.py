@@ -1,8 +1,10 @@
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langgraph.graph import StateGraph, START,END
 
-from langchain_core.messages import BaseMessage,HumanMessage
+from langchain_core.messages import BaseMessage,HumanMessage,SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, EmailStr
 from typing import TypedDict, Annotated, List
@@ -17,14 +19,22 @@ load_dotenv()
 
 
 llm =ChatNVIDIA(
-    model="qwen/qwen3.5-122b-a10b",
-    temperature=0.7
+    model="stepfun-ai/step-3.5-flash",
+    temperature=0.7,
+    streaming=True
 )
 app = FastAPI()
 
 # router = APIRouter()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
 
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
@@ -35,8 +45,9 @@ def chat_node(state:ChatState):
     return {"messages": [response]}
 
 
-checkpointer = InMemorySaver();
+checkpointer = InMemorySaver()
 
+system_message = SystemMessage(content="You are a helpful assistant. dont provide any code, just answer the question in a concise manner. If you dont know the answer, say you dont know")
 
 graph = StateGraph(ChatState)
 
@@ -74,12 +85,21 @@ def get_messages():
 @app.post("/chat",response_model=ResponseMessage)
 def sendMessage(inputMsg:InputMessage):
     fake_db.append(inputMsg)
-    message = chatbot.invoke({
-        "messages":HumanMessage(inputMsg["message"])
-    },config={"configurable":{"thread_id":"user_1"}})["messages"][-1].content
-    response:ResponseMessage  = {"id": len(fake_db) +1 , "response":message}
-    fake_db.append(response)
-    return response
+
+    def generate():
+        fullresponse = ""
+
+        for messae_chunk,metadata in chatbot.stream({"messages": [system_message, HumanMessage(inputMsg["message"])]},config={"configurable":{"thread_id":"user_1"}},stream_mode='messages'):
+            if messae_chunk.content:
+                chunk = messae_chunk.content
+                fullresponse += chunk
+                yield chunk
+        response:ResponseMessage = {
+            "id": len(fake_db) +1,
+            "response": fullresponse
+        }
+        fake_db.append(response)
+    return StreamingResponse(generate(),media_type='text/plain')
 
 
 
